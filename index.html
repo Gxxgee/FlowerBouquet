@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta property="og:title" content="Code Bouquet">
+<meta property="og:description" content="A spinning bouquet of flowers made of code.">
+<meta name="theme-color" content="#ff78af">
+<title>Code Bouquet</title>
+<style>
+  /* Single dark look on purpose: it imitates a terminal window. Full-bleed canvas, text drawn as a character grid. */
+  :root {
+    --bg: #12101c;
+    --ink: #ff78af;
+    --muted: #8a8499;
+    --mono: Consolas, Menlo, "DejaVu Sans Mono", "Liberation Mono", monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--muted); }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+  canvas:active { cursor: grabbing; }
+</style>
+</head>
+<body>
+
+<canvas id="c" aria-label="A spinning bouquet of colorful flowers drawn with text characters"></canvas>
+
+<script>
+(() => {
+  const TAU = Math.PI * 2, TILT = 0.22, ASPECT = 2, RAMP = ".,-~:;=!*#$@";
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const SPEED = reduceMotion ? 0.25 : 0.8;
+  const BG = getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#12101c';
+  const MONO = getComputedStyle(document.documentElement).getPropertyValue('--mono').trim() || 'monospace';
+
+  // ---------- vector + color helpers ----------
+  const add = (a, b, k = 1) => [a[0] + b[0] * k, a[1] + b[1] * k, a[2] + b[2] * k];
+  const scale = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+  const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+  const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+  const shade = (c, k) => c.map(v => Math.max(0, Math.min(255, Math.round(v * k))));
+  const blend = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = arr => arr[(Math.random() * arr.length) | 0];
+  const shuffled = arr => { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = (Math.random() * (i + 1)) | 0; [a[i], a[j]] = [a[j], a[i]]; } return a; };
+
+  const LIGHT = norm([-0.35, 0.5, -0.8]);
+  const PALETTE = [
+    [240, 50, 60], [255, 95, 175], [255, 145, 45], [255, 220, 50], [170, 90, 240], [210, 170, 255],
+    [70, 195, 250], [250, 80, 200], [255, 255, 255], [255, 110, 85], [95, 115, 255], [255, 175, 205],
+  ];
+  const LEAF_GREENS = [[70, 200, 70], [110, 215, 80], [50, 170, 70]];
+  const STEM_GREEN = [70, 165, 60], YELLOW = [255, 205, 40], RIBBON = [255, 85, 150], PAPER = [235, 235, 245];
+  const M_FLOWER = 0, M_GREEN = 1, M_PAPER = 2, M_RIBBON = 3;
+
+  // ---------- point cloud ----------
+  let pts = [];
+  const put = (p, n, c, m = M_FLOWER) => pts.push(p[0], p[1], p[2], n[0], n[1], n[2], c[0], c[1], c[2], m);
+
+  function basis(n) {
+    let u = cross([0, 1, 0], n);
+    u = dot(u, u) < 1e-4 ? [1, 0, 0] : norm(u);
+    const v = cross(n, u), t = rand(0, TAU), c = Math.cos(t), s = Math.sin(t);
+    return [add(scale(u, c), v, s), add(scale(u, -s), v, c)];
+  }
+
+  function polarFlower(P, N, R, dens, inside, colorAt, heightAt) {
+    const [U, V] = basis(N);
+    const rings = Math.round(22 * dens);
+    for (let i = 1; i <= rings; i++) {
+      const q = i / rings, steps = Math.max(10, Math.round(110 * dens * q));
+      for (let j = 0; j < steps; j++) {
+        const th = TAU * j / steps + i * 0.21;
+        if (!inside(q, th)) continue;
+        const [w, slope] = heightAt(q, th);
+        const radial = add(scale(U, Math.cos(th)), V, Math.sin(th));
+        put(add(add(P, radial, R * q), N, w * R), norm(add(N, radial, -slope)), colorAt(q, th));
+      }
+    }
+    put(P, N, colorAt(0, 0));
+  }
+
+  function daisy(P, N, R, color, dens) {
+    polarFlower(P, N, R, dens,
+      (q, th) => q < 0.32 || Math.abs(((th * 11 / TAU) % 1) - 0.5) < 0.42 * Math.sqrt(Math.max(0, 1 - q ** 6)),
+      (q) => q < 0.32 ? (q < 0.22 ? YELLOW : [230, 140, 20]) : shade(color, 0.8 + 0.2 * q),
+      (q) => q < 0.32 ? [0.12 * (1 - q / 0.32), -0.3] : [-0.05 * q, -0.05]);
+  }
+  function rose(P, N, R, color, dens) {
+    polarFlower(P, N, R, dens,
+      (q, th) => q < 0.86 + 0.14 * Math.cos(5 * th),
+      (q, th) => Math.sin(q * 5.5 * Math.PI + th) > 0.75 ? shade(color, 0.6) : shade(color, 0.85 + 0.15 * q),
+      (q) => [0.3 * (1 - q * q), 0.6 * q]);
+  }
+  function blossom(P, N, R, color, dens) {
+    polarFlower(P, N, R, dens,
+      (q, th) => q < 0.25 || q < 0.45 + 0.55 * Math.sin(Math.PI * ((th * 5 / TAU) % 1)) ** 0.6,
+      (q) => q < 0.14 ? YELLOW : blend([255, 250, 240], color, Math.min(1, q / 0.45)),
+      (q) => [0.15 * q, 0.3 * q]);
+  }
+  function lily(P, N, R, color, dens) {
+    polarFlower(P, N, R, dens,
+      (q, th) => q < 0.2 + 0.8 * Math.abs(Math.cos(3 * th)) ** 2.2,
+      (q, th) => q < 0.18 ? YELLOW
+        : (q > 0.35 && q < 0.6 && Math.floor(th * 40) % 5 === 0) ? shade(color, 0.5)
+        : blend([255, 245, 225], color, Math.min(1, q / 0.4)),
+      (q) => [0.25 * q * q, 0.5 * q]);
+  }
+  function tulip(P, N, R, color, dens) {
+    const [U, V] = basis(N);
+    const layers = Math.round(30 * dens), steps = Math.round(90 * dens);
+    for (let i = 0; i <= layers; i++) {
+      const h = i / layers, rho = R * (0.35 + 0.5 * Math.sin(Math.PI * h * 0.8));
+      for (let j = 0; j < steps; j++) {
+        const th = TAU * j / steps;
+        if (h > 0.72 + 0.28 * Math.abs(Math.cos(1.5 * th))) continue;   // three pointed petal tips
+        const radial = add(scale(U, Math.cos(th)), V, Math.sin(th));
+        put(add(add(P, radial, rho), N, (h * 1.5 - 0.5) * R), norm(add(radial, N, -0.25)), shade(color, 0.75 + 0.25 * h));
+      }
+    }
+    const base = Math.round(8 * dens);
+    for (let i = 0; i <= base; i++) {
+      const r = 0.35 * R * i / base;
+      for (let j = 0; j < 24; j++) {
+        const th = TAU * j / 24, radial = add(scale(U, Math.cos(th)), V, Math.sin(th));
+        put(add(add(P, radial, r), N, -0.5 * R), scale(N, -1), shade(color, 0.6));
+      }
+    }
+  }
+  const KINDS = { daisy, rose, blossom, lily, tulip };
+
+  function tube(a, b, radius, color, dens) {
+    const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], length = Math.hypot(...d);
+    const u = norm(cross(d, [0.3, 0.1, 1])), v = norm(cross(d, u));
+    const steps = Math.max(2, Math.round(length / 0.012 * dens));
+    for (let i = 0; i <= steps; i++) {
+      const p = add(a, d, i / steps);
+      for (let k = 0; k < 4; k++) {
+        const t = TAU * k / 4, n = add(scale(u, Math.cos(t)), v, Math.sin(t));
+        put(add(p, n, radius), n, color, M_GREEN);
+      }
+    }
+  }
+
+  function leaf(base, D, width, length, color, dens) {
+    D = norm(D);
+    let side = cross([0, 1, 0], D);
+    side = dot(side, side) < 1e-4 ? [1, 0, 0] : norm(side);
+    let up = norm(cross(side, D));
+    if (up[1] < 0) up = scale(up, -1);
+    const along = Math.round(40 * dens), across = Math.round(7 * dens) + 2;
+    for (let i = 0; i <= along; i++) {
+      const t = i / along, half = width * Math.sin(Math.PI * t) ** 0.8, bend = -0.3 * length * t * t;
+      for (let j = -across; j <= across; j++) {
+        const s = j / across;
+        let p = add(add(add(base, D, length * t), side, half * s), up, 0.25 * width * Math.abs(s));
+        p = add(p, [0, 1, 0], bend);
+        put(p, norm(add(up, side, -0.4 * s)), j === 0 ? shade(color, 0.65) : color, M_GREEN);
+      }
+    }
+  }
+
+  const TIE_Y = -0.62, RIM_Y = 0.16, R0 = 0.07, R1 = 0.45, PEAKS = 8;
+  function wrap(dens) {
+    const rows = Math.round(60 * dens), cols = Math.round(200 * dens);
+    for (let i = 0; i <= rows; i++) {
+      const t = i / rows;
+      for (let j = 0; j < cols; j++) {
+        const th = TAU * j / cols;
+        const saw = Math.abs(((th * PEAKS / TAU) % 1) - 0.5) * 2;
+        const y = TIE_Y + t * (RIM_Y + 0.12 * (1 - saw) - TIE_Y);
+        const r = R0 + (R1 - R0) * (y - TIE_Y) / (RIM_Y - TIE_Y);
+        put([r * Math.cos(th), y, r * Math.sin(th)], norm([Math.cos(th), -0.15, Math.sin(th)]), PAPER, M_PAPER);
+      }
+    }
+  }
+
+  function bow(dens) {
+    const yk = -0.53, cz = -0.125;
+    const bandRows = Math.round(10 * dens), bandCols = Math.round(120 * dens);
+    for (let i = 0; i <= bandRows; i++) {
+      const y = -0.57 + 0.07 * i / bandRows;
+      for (let j = 0; j < bandCols; j++) {
+        const th = TAU * j / bandCols;
+        put([0.115 * Math.cos(th), y, 0.115 * Math.sin(th)], [Math.cos(th), 0, Math.sin(th)], RIBBON, M_RIBBON);
+      }
+    }
+    const lr = Math.round(14 * dens), lc = Math.round(90 * dens);
+    for (const s of [-1, 1]) {
+      for (let i = 0; i <= lr; i++) {
+        const rho = 0.4 + 0.6 * i / lr;
+        for (let j = 0; j < lc; j++) {
+          const t = TAU * j / lc;
+          put([s * (0.15 + 0.14 * rho * Math.cos(t)), yk + 0.03 + 0.08 * rho * Math.sin(t), cz - 0.04 * rho],
+              norm([s * 0.5 * rho * Math.cos(t), 0.5 * rho * Math.sin(t), -1]), RIBBON, M_RIBBON);
+        }
+      }
+      const tl = Math.round(40 * dens);
+      for (let i = 0; i <= tl; i++) {
+        const u = i / tl, x0 = s * (0.01 + 0.11 * u), y0 = yk - 0.3 * u;
+        for (let j = -4; j <= 4; j++)
+          put([x0 + 0.01 * j, y0 + s * 0.004 * j, cz - 0.02], norm([s * 0.3, 0, -1]), shade(RIBBON, 0.85), M_RIBBON);
+      }
+    }
+    for (let i = 0; i < 12; i++) {
+      const a = Math.PI * i / 11;
+      for (let j = 0; j < 24; j++) {
+        const b = TAU * j / 24, n = [Math.sin(a) * Math.cos(b), Math.cos(a), Math.sin(a) * Math.sin(b)];
+        put(add([0, yk, cz - 0.02], n, 0.04), n, shade(RIBBON, 0.9), M_RIBBON);
+      }
+    }
+  }
+
+  let P = new Float32Array(0), NP = 0;
+  function build(dens) {
+    pts = [];
+    const tie = [0, TIE_Y + 0.08, 0];
+    const heads = [[[0, 1.02, 0], [0, 1, -0.15]]];
+    for (let k = 0; k < 3; k++) {
+      const a = TAU * k / 3 + 0.5;
+      heads.push([[0.33 * Math.cos(a), 0.84, 0.33 * Math.sin(a)], [Math.cos(a), 1.2, Math.sin(a)]]);
+    }
+    for (let k = 0; k < 7; k++) {
+      const a = TAU * k / 7 + 0.2, y = k % 2 ? 0.5 : 0.64;
+      heads.push([[0.74 * Math.cos(a), y, 0.74 * Math.sin(a)], [Math.cos(a), 0.45, Math.sin(a)]]);
+    }
+    const colors = shuffled(PALETTE);
+    let kinds = [];
+    while (kinds.length < heads.length) kinds = kinds.concat(shuffled(Object.keys(KINDS)));
+    heads.forEach(([Pos, d], i) => {
+      const N = norm(d), R = rand(0.24, 0.27);
+      KINDS[kinds[i]](Pos, N, R, colors[i], dens);
+      tube(add(Pos, N, -0.06), tie, 0.012, STEM_GREEN, dens);
+      tube(tie, [-Pos[0] * 0.12, -1.05, -Pos[2] * 0.12], 0.012, STEM_GREEN, dens);
+    });
+    for (let k = 0; k < 7; k++) {
+      const a = TAU * k / 7 + 0.2 + TAU / 14;
+      leaf([0.15 * Math.cos(a), 0.2, 0.15 * Math.sin(a)], [Math.cos(a), rand(0.7, 1.0), Math.sin(a)], 0.09, rand(0.5, 0.6), pick(LEAF_GREENS), dens);
+    }
+    for (let k = 0; k < 9; k++) {
+      const a = TAU * k / 9 + rand(-0.2, 0.2);
+      leaf([0.35 * Math.cos(a), 0.2, 0.35 * Math.sin(a)], [Math.cos(a), rand(0, 0.3), Math.sin(a)], 0.07, rand(0.3, 0.38), pick(LEAF_GREENS), dens);
+    }
+    wrap(dens);
+    bow(dens);
+    P = new Float32Array(pts); NP = P.length / 10; pts = [];
+  }
+
+  // ---------- screen + layout ----------
+  const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  let dpr = 1, vw = 0, vh = 0, fs = 12, cellW = 7, cellH = 14, COLS = 80, ROWS = 40, offX = 0, offY = 0;
+  let K1 = 1, K2 = 3.6, CX = 40, CY = 20, TEXT_ROW = 38;
+  let zbuf = new Float32Array(0), cellL = new Float32Array(0), cellI = new Int32Array(0);
+  let stars = [];
+  let builtDens = 0;
+
+  function layout() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    vw = innerWidth; vh = innerHeight;
+    cv.width = Math.round(vw * dpr); cv.height = Math.round(vh * dpr);
+    // aim for ~64 text rows, but keep at least ~72 columns on narrow phones
+    let targetH = Math.max(7, vh / 64);
+    fs = targetH / 1.2;
+    ctx.font = `${fs}px ${MONO}`;
+    let w = ctx.measureText('M').width;
+    if (vw / w < 72) { fs *= (vw / 72) / w; ctx.font = `${fs}px ${MONO}`; w = ctx.measureText('M').width; }
+    cellW = w; cellH = w * ASPECT;
+    COLS = Math.max(20, Math.floor(vw / cellW)); ROWS = Math.max(12, Math.floor(vh / cellH));
+    offX = (vw - COLS * cellW) / 2; offY = (vh - ROWS * cellH) / 2;
+    const usable = ROWS - 2;
+    K1 = Math.max(1, Math.min(usable / 2.65, COLS / (2 * ASPECT * 1.05))) * K2;
+    CX = COLS / 2; CY = usable / 2 + 0.2 * K1 / K2;
+    TEXT_ROW = Math.min(ROWS - 1, Math.floor(CY + 1.15 * K1 / K2));
+    zbuf = new Float32Array(COLS * ROWS); cellL = new Float32Array(COLS * ROWS); cellI = new Int32Array(COLS * ROWS);
+    const dens = Math.max(0.8, Math.min(1.6, ROWS / 45));
+    if (Math.abs(dens - builtDens) > 0.25) { build(dens); builtDens = dens; }
+  }
+
+  const message = '';
+
+  // ---------- animation + drawing ----------
+  let angle = 0.4, vel = SPEED, last = performance.now(), time = 0, dragging = false, lastX = 0, lastT = 0;
+  const colorCache = new Map();
+  const rgbStr = (r, g, b) => {
+    const key = (r << 16) | (g << 8) | b;
+    let s = colorCache.get(key);
+    if (!s) { s = `rgb(${r},${g},${b})`; colorCache.set(key, s); }
+    return s;
+  };
+
+  function frame(now) {
+    const dt = Math.min(0.05, Math.max(0, (now - last) / 1000)); last = now; time += dt;
+    if (!dragging) { vel += (SPEED - vel) * Math.min(1, dt * 1.2); angle += vel * dt; }
+
+    const cA = Math.cos(angle), sA = Math.sin(angle), cB = Math.cos(TILT), sB = Math.sin(TILT);
+    const [lx, ly, lz] = LIGHT, kx = ASPECT * K1, W = COLS, H = ROWS;
+    zbuf.fill(0); cellI.fill(-1);
+
+    for (let i = 0, o = 0; i < NP; i++, o += 10) {
+      const x = P[o], y = P[o + 1], z = P[o + 2];
+      const x1 = x * cA + z * sA, z1 = z * cA - x * sA;
+      const y2 = y * cB + z1 * sB, z2 = z1 * cB - y * sB + K2;
+      const ooz = 1 / z2;
+      const xp = (CX + kx * x1 * ooz) | 0, yp = (CY - K1 * y2 * ooz) | 0;
+      if (xp < 0 || xp >= W || yp < 0 || yp >= H) continue;
+      const idx = yp * W + xp;
+      if (ooz <= zbuf[idx]) continue;
+      zbuf[idx] = ooz;
+      const nx = P[o + 3], ny = P[o + 4], nz = P[o + 5];
+      const nx1 = nx * cA + nz * sA, nz1 = nz * cA - nx * sA;
+      const ny2 = ny * cB + nz1 * sB, nz2 = nz1 * cB - ny * sB;
+      let L = nx1 * lx + ny2 * ly + nz2 * lz;
+      if (nx1 * x1 + ny2 * y2 + nz2 * z2 > 0) L = -L;      // looking at the back side
+      cellL[idx] = L; cellI[idx] = o;
+    }
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = BG; ctx.fillRect(0, 0, vw, vh);
+    ctx.font = `${fs}px ${MONO}`; ctx.textBaseline = 'middle';
+
+    const starMap = new Map();
+    for (const [fx, fy, ph] of stars) {
+      const b = 0.5 + 0.5 * Math.sin(time * 2.2 + ph);
+      const g = (90 + 150 * b) | 0;
+      starMap.set(((fy * (H - 1)) | 0) * W + ((fx * (W - 1)) | 0), [b < 0.45 ? '.' : b < 0.85 ? '+' : '*', rgbStr(g, g, Math.min(255, g + 15))]);
+    }
+
+    const top = RAMP.length - 1, msgStart = ((W - message.length) / 2) | 0;
+    for (let row = 0; row < H; row++) {
+      const yPix = offY + row * cellH + cellH / 2;
+      let run = '', runColor = null, runStart = 0;
+      const flush = () => { if (runColor && run) { ctx.fillStyle = runColor; ctx.fillText(run, offX + runStart * cellW, yPix); } };
+      for (let col = 0; col < W; col++) {
+        let ch = ' ', color = null;
+        if (row === TEXT_ROW && col >= msgStart && col < msgStart + message.length) {
+          ch = message[col - msgStart]; color = 'rgb(255,120,175)';
+        } else {
+          const idx = row * W + col, o = cellI[idx];
+          if (o >= 0) {
+            const m = P[o + 9], L = cellL[idx];
+            if (m === M_PAPER) {
+              const stripe = Math.floor((P[o + 1] - TIE_Y) * 22) % 2;
+              const lq = Math.round(Math.max(L, 0) * 4) / 4;
+              const k = (stripe ? 0.75 : 0.55) + 0.3 * lq;
+              ch = '='; color = rgbStr(Math.min(255, P[o + 6] * k) | 0, Math.min(255, P[o + 7] * k) | 0, Math.min(255, P[o + 8] * k) | 0);
+            } else {
+              const lum = 0.5 + 0.5 * Math.abs(L);
+              const k = Math.min(top, (lum * (top + 0.999)) | 0);
+              const f = 0.8 + 0.25 * (k / top);
+              ch = RAMP[k]; color = rgbStr(Math.min(255, P[o + 6] * f) | 0, Math.min(255, P[o + 7] * f) | 0, Math.min(255, P[o + 8] * f) | 0);
+            }
+          } else {
+            const s = starMap.get(idx);
+            if (s) { ch = s[0]; color = s[1]; }
+          }
+        }
+        if (color !== runColor) { flush(); run = ''; runColor = color; runStart = col; }
+        run += ch;
+      }
+      flush();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // ---------- drag to spin ----------
+  cv.addEventListener('pointerdown', e => {
+    dragging = true; lastX = e.clientX; lastT = performance.now(); vel = 0;
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    const now = performance.now(), d = (e.clientX - lastX) * 0.01;
+    angle -= d;
+    vel = vel * 0.6 + (-d / Math.max(0.001, (now - lastT) / 1000)) * 0.4;
+    lastX = e.clientX; lastT = now;
+  });
+  const endDrag = () => {
+    if (!dragging) return;
+    dragging = false;
+    if (performance.now() - lastT > 80) vel *= 0.3;
+    vel = Math.max(-10, Math.min(10, vel));
+  };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', endDrag);
+
+  stars = Array.from({ length: 90 }, () => [Math.random(), Math.random(), rand(0, TAU)]);
+  addEventListener('resize', layout);
+  layout();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
